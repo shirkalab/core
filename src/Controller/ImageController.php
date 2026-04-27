@@ -20,6 +20,8 @@ use Throwable;
 
 class ImageController
 {
+    private const SUPPORTED_FORMATS = ['jpg', 'webp', 'png', 'gif', 'avif'];
+
     private Server $server;
 
     /**
@@ -28,7 +30,8 @@ class ImageController
      *     h?: int,
      *     fit?: string,
      *     location?: string,
-     *     q?: int
+     *     q?: int,
+     *     fm?: string
      * }
      */
     private array $parameters = [];
@@ -149,7 +152,14 @@ class ImageController
         }
 
         try {
-            return $this->server->getImageResponse($filename, $this->parameters);
+            $response = $this->server->getImageResponse($filename, $this->parameters);
+            $contentType = $this->getContentTypeForFormat($this->parameters['fm'] ?? null);
+
+            if ($contentType !== null) {
+                $response->headers->set('Content-Type', $contentType);
+            }
+
+            return $response;
         } catch (FileNotFoundException) {
             return $this->sendErrorImage();
         }
@@ -158,25 +168,45 @@ class ImageController
     private function parseParameters(string $paramString): void
     {
         $raw = explode('×', (string) preg_replace('/([0-9])(x)([0-9a-z])/i', '\1×\3', $paramString));
+        $defaultFit = $this->config->get('general/thumbnails/default_cropping', 'default');
 
         $this->parameters = [
             'w' => (isset($raw[0]) && is_numeric($raw[0])) ? (int) $raw[0] : 400,
             'h' => (isset($raw[1]) && is_numeric($raw[1])) ? (int) $raw[1] : 300,
-            'fit' => $raw[2] ?? $this->config->get('general/thumbnails/default_cropping', 'default'),
+            'fm' => '',
+            'fit' => $defaultFit,
             'location' => 'files',
-            'q' => (! empty($raw[2]) && 0 <= $raw[2] && $raw[2] <= 100) ? (int) $raw[2] : 80,
+            'q' => 80,
         ];
 
-        if (isset($raw[4])) {
-            $this->parameters['fit'] = $this->parseFit($raw[3]);
-            $this->parameters['location'] = $raw[4];
-        } elseif (isset($raw[3])) {
-            $possibleFit = $this->parseFit($raw[3]);
+        $remaining = array_values(array_filter(
+            array_slice($raw, 2),
+            static fn ($value): bool => $value !== null && $value !== ''
+        ));
 
-            if ($this->testFit($possibleFit)) {
-                $this->parameters['fit'] = $possibleFit;
-            } else {
-                $this->parameters['location'] = $raw[3];
+        if (isset($remaining[0]) && is_numeric($remaining[0]) && 0 <= (int) $remaining[0] && (int) $remaining[0] <= 100) {
+            $this->parameters['q'] = (int) array_shift($remaining);
+        }
+
+        foreach ($remaining as $token) {
+            $token = (string) $token;
+            $normalizedToken = mb_strtolower($token);
+
+            if ($this->parameters['fm'] === '' && $this->isSupportedFormat($normalizedToken)) {
+                $this->parameters['fm'] = $normalizedToken;
+
+                continue;
+            }
+
+            $fit = $this->parseFit($normalizedToken);
+            if ($this->parameters['fit'] === $defaultFit && $this->testFit($fit)) {
+                $this->parameters['fit'] = $fit;
+
+                continue;
+            }
+
+            if ($this->parameters['location'] === 'files') {
+                $this->parameters['location'] = $token;
             }
         }
     }
@@ -203,6 +233,11 @@ class ImageController
         return (bool) preg_match('/^(contain|max|fill|stretch|crop)(-.+)?/', $fit);
     }
 
+    private function isSupportedFormat(string $format): bool
+    {
+        return in_array($format, self::SUPPORTED_FORMATS, true);
+    }
+
     public function parseFit(string $fit): string
     {
         return match ($fit) {
@@ -225,6 +260,18 @@ class ImageController
             $this->parameters['fit'] ?? '',
             $this->parameters['location'] ?? ''
         );
+    }
+
+    private function getContentTypeForFormat(?string $format): ?string
+    {
+        return match ($format) {
+            'jpg' => 'image/jpeg',
+            'png' => 'image/png',
+            'gif' => 'image/gif',
+            'webp' => 'image/webp',
+            'avif' => 'image/avif',
+            default => null,
+        };
     }
 
     public function sendErrorImage(): Response
